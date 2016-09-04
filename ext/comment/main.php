@@ -248,10 +248,10 @@ class CommentList extends Extension {
 		global $config, $database;
 		$cc = $config->get_int("comment_count");
 		if($cc > 0) {
-			$recent = $database->cache->get("recent_comments");
+			$recent = $database->cache->get("recent_comments_".$user->id);
 			if(empty($recent)) {
 				$recent = $this->get_recent_comments($cc);
-				$database->cache->set("recent_comments", $recent, 60);
+				$database->cache->set("recent_comments_".$user->id, $recent, 60);
 			}
 			if(count($recent) > 0) {
 				$this->theme->display_recent_comments($recent);
@@ -341,16 +341,25 @@ class CommentList extends Extension {
 	 */
 	private function build_page(/*int*/ $current_page) {
 		global $database, $user;
-
-		$where = SPEED_HAX ? "WHERE posted > now() - interval '24 hours'" : "";
 		
-		$total_pages = $database->cache->get("comment_pages");
+		$where = SPEED_HAX ? "WHERE comments.posted > now() - interval '24 hours' " : "WHERE TRUE ";
+		$where = new Querylet($where);
+
+				if(ext_is_live("Filters")) {
+					$filter = Filters::get_comment_filter_querylet($user);
+					$where->append_sql("AND ");
+					$where->append($filter);
+				}
+		
+		$total_pages = $database->cache->get("comment_pages_".$user->id);
 		if(empty($total_pages)) {
-			$total_pages = (int)($database->get_one("
-				SELECT COUNT(c1)
-				FROM (SELECT COUNT(image_id) AS c1 FROM comments $where GROUP BY image_id) AS s1
-			") / 10);
-			$database->cache->set("comment_pages", $total_pages, 600);
+						$query = new Querylet("SELECT COUNT(c1)
+				FROM (SELECT COUNT(comments.image_id) AS c1 FROM comments ");
+						$query->append($where);
+						$query->append(new Querylet(" GROUP BY comments.image_id) AS s1
+			"));
+			$total_pages = (int)($database->get_one($query->sql, $query->variables) / 10);
+			$database->cache->set("comment_pages_".$user->id, $total_pages, 600);
 		}
 		$total_pages = max($total_pages, 1);
 
@@ -359,14 +368,16 @@ class CommentList extends Extension {
 		$threads_per_page = 10;
 		$start = $threads_per_page * ($current_page - 1);
 
-		$result = $database->Execute("
-			SELECT image_id,MAX(posted) AS latest
-			FROM comments
-			$where
-			GROUP BY image_id
-			ORDER BY latest DESC
-			LIMIT :limit OFFSET :offset
-		", array("limit"=>$threads_per_page, "offset"=>$start));
+		$query = new Querylet("
+					SELECT comments.image_id,MAX(comments.posted) AS latest
+					FROM comments ");
+				$query->append($where);
+				$query->append(new Querylet("
+					GROUP BY comments.image_id
+					ORDER BY latest DESC
+					LIMIT :limit OFFSET :offset"
+		, array("limit"=>$threads_per_page, "offset"=>$start)));
+		$result = $database->Execute($query->sql, $query->variables);
 
 		$user_ratings = ext_is_live("Ratings") ? Ratings::get_user_privs($user) : "";
 
@@ -390,6 +401,18 @@ class CommentList extends Extension {
 // }}}
 
 // get comments {{{
+		private static function get_generic_query() {
+			return new Querylet("
+				SELECT
+						users.id as user_id, users.name as user_name, users.email as user_email, users.class as user_class,
+						comments.comment as comment, comments.id as comment_id,
+						comments.image_id as image_id, comments.owner_ip as poster_ip,
+						comments.posted as posted
+				FROM comments
+				LEFT JOIN users ON comments.owner_id=users.id
+				WHERE TRUE ");
+		}
+
 	/**
 	 * @param string $query
 	 * @param array $args
@@ -410,17 +433,19 @@ class CommentList extends Extension {
 	 * @return Comment[]
 	 */
 	private function get_recent_comments($count) {
-		return $this->get_generic_comments("
-			SELECT
-				users.id as user_id, users.name as user_name, users.email as user_email, users.class as user_class,
-				comments.comment as comment, comments.id as comment_id,
-				comments.image_id as image_id, comments.owner_ip as poster_ip,
-				comments.posted as posted
-			FROM comments
-			LEFT JOIN users ON comments.owner_id=users.id
+		global $user;
+		$query = self::get_generic_query();
+
+		if(ext_is_live("Filters")) {
+			$query->append_sql("AND ");
+			$filter = Filters::get_comment_filter_querylet($user);
+			$query->append($filter);
+		}
+
+		$query->append(new Querylet("
 			ORDER BY comments.id DESC
-			LIMIT :limit
-		", array("limit"=>$count));
+			LIMIT :limit", array("limit"=>$count)));
+		return $this->get_generic_comments($query->sql, $query->variables);
 	}
 
 	/**
@@ -430,18 +455,21 @@ class CommentList extends Extension {
 	 * @return Comment[]
 	 */
 	private function get_user_comments(/*int*/ $user_id, /*int*/ $count, /*int*/ $offset=0) {
-		return $this->get_generic_comments("
-			SELECT
-				users.id as user_id, users.name as user_name, users.email as user_email, users.class as user_class,
-				comments.comment as comment, comments.id as comment_id,
-				comments.image_id as image_id, comments.owner_ip as poster_ip,
-				comments.posted as posted
-			FROM comments
-			LEFT JOIN users ON comments.owner_id=users.id
-			WHERE users.id = :user_id
+		global $user;
+		$query = self::get_generic_query();
+		
+		if(ext_is_live("Filters")) {
+			$query->append_sql("AND ");
+			$filter = Filters::get_comment_filter_querylet($user);
+			$query->append($filter);
+		}
+		
+		$query->append(new Querylet("
+			AND users.id = :user_id
 			ORDER BY comments.id DESC
-			LIMIT :limit OFFSET :offset
-		", array("user_id"=>$user_id, "offset"=>$offset, "limit"=>$count));
+			LIMIT :limit OFFSET :offset"
+		, array("user_id"=>$user_id, "offset"=>$offset, "limit"=>$count)));
+		return $this->get_generic_comments($query->sql, $query->variables);
 	}
 
 	/**
@@ -449,17 +477,12 @@ class CommentList extends Extension {
 	 * @return Comment[]
 	 */
 	private function get_comments(/*int*/ $image_id) {
-		return $this->get_generic_comments("
-			SELECT
-				users.id as user_id, users.name as user_name, users.email as user_email, users.class as user_class,
-				comments.comment as comment, comments.id as comment_id,
-				comments.image_id as image_id, comments.owner_ip as poster_ip,
-				comments.posted as posted
-			FROM comments
-			LEFT JOIN users ON comments.owner_id=users.id
-			WHERE comments.image_id=:image_id
-			ORDER BY comments.id ASC
-		", array("image_id"=>$image_id));
+		$query = self::get_generic_query();
+		// No filter here, as image should be filtered first
+		$query->append(new Querylet("
+			AND comments.image_id=:image_id
+			ORDER BY comments.id ASC", array("image_id"=>$image_id)));
+		return $this->get_generic_comments($query->sql, $query->variables);
 	}
 // }}}
 
@@ -517,11 +540,11 @@ class CommentList extends Extension {
 		global $config, $user;
 		if(strlen($config->get_string('comment_wordpress_key')) > 0) {
 			$comment = array(
-				'author'       => $user->name,
-				'email'        => $user->email,
-				'website'      => '',
-				'body'         => $text,
-				'permalink'    => '',
+				'author'	   => $user->name,
+				'email'		=> $user->email,
+				'website'	  => '',
+				'body'		 => $text,
+				'permalink'	=> '',
 				);
 
 			# akismet breaks if there's no referrer in the environment; so if there

@@ -792,7 +792,7 @@ class Image {
 	 * @param string[] $terms
 	 * @return \Querylet
 	 */
-	private static function build_search_querylet($terms) {
+	public static function build_search_querylet($terms) {
 		assert('is_array($terms)');
 		global $database;
 

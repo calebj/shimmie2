@@ -6,6 +6,20 @@
  * Description: Show the tags in various ways
  */
 
+// This event allows the filtering of displayed tags.
+class TagListEvent extends Event {
+	public $query = null;
+
+	public function __construct($query) {
+		$this->query = $query;
+	}
+
+	public function append(Querylet $query) {
+		$this->query->append($query);
+		return $this->query;
+	}
+}
+
 class TagList extends Extension {
 	public function onInitExt(InitExtEvent $event) {
 		global $config;
@@ -184,13 +198,20 @@ class TagList extends Extension {
 
 		$tags_min = $this->get_tags_min();
 
-		$tag_data = $database->get_col($database->scoreql_to_sql("
+		$querylet = new Querylet($database->scoreql_to_sql("
 			SELECT DISTINCT
 				SCORE_STRNORM(substr(tag, 1, 1))
 			FROM tags
-			WHERE count >= :tags_min
-			ORDER BY SCORE_STRNORM(substr(tag, 1, 1))
-		"), array("tags_min"=>$tags_min));
+			WHERE count >= :tags_min"),
+			array("tags_min"=>$tags_min)
+			);
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+
+		$querylet->append_sql($database->scoreql_to_sql(" ORDER BY SCORE_STRNORM(substr(tag, 1, 1))"));
+
+		$tag_data = $database->get_col($querylet->sql, $querylet->variables);
 
 		$html = "<span class='atoz'>";
 		foreach($tag_data as $a) {
@@ -224,21 +245,24 @@ class TagList extends Extension {
 
 		$tags_min = $this->get_tags_min();
 		$starts_with = $this->get_starts_with();
-		
+
 		// check if we have a cached version
 		$cache_key = data_path("cache/tag_cloud-" . md5("tc" . $tags_min . $starts_with) . ".html");
 		if(file_exists($cache_key)) {return file_get_contents($cache_key);}
 
 		// SHIT: PDO/pgsql has problems using the same named param twice -_-;;
-		$tag_data = $database->get_all($database->scoreql_to_sql("
-				SELECT
-					tag,
-					FLOOR(LOG(2.7, LOG(2.7, count - :tags_min2 + 1)+1)*1.5*100)/100 AS scaled
-				FROM tags
-				WHERE count >= :tags_min
-				AND tag SCORE_ILIKE :starts_with
-				ORDER BY SCORE_STRNORM(tag)
-			"), array("tags_min"=>$tags_min, "tags_min2"=>$tags_min, "starts_with"=>$starts_with));
+		$querylet = new Querylet($database->scoreql_to_sql("
+			SELECT tag,
+			FLOOR(LOG(2.7, LOG(2.7, count - :tags_min2 + 1)+1)*1.5*100)/100 AS scaled
+			FROM tags
+			WHERE count >= :tags_min
+			AND tag SCORE_ILIKE :starts_with"),
+			array("tags_min"=>$tags_min, "tags_min2"=>$tags_min, "starts_with"=>$starts_with));
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+		$querylet->append_sql($database->scoreql_to_sql(" ORDER BY SCORE_STRNORM(tag)"));
+		$tag_data = $database->get_all($querylet->sql, $querylet->variables);
 
 		$html = "";
 		if($config->get_bool("tag_list_pages")) $html .= $this->build_az();
@@ -264,37 +288,46 @@ class TagList extends Extension {
 
 		$tags_min = $this->get_tags_min();
 		$starts_with = $this->get_starts_with();
-		
+
 		// check if we have a cached version
 		$cache_key = data_path("cache/tag_alpha-" . md5("ta" . $tags_min . $starts_with) . ".html");
 		if(file_exists($cache_key)) {return file_get_contents($cache_key);}
 
-		$tag_data = $database->get_pairs($database->scoreql_to_sql("
+		$querylet = new Querylet($database->scoreql_to_sql("
 				SELECT tag, count
 				FROM tags
 				WHERE count >= :tags_min
 				AND tag SCORE_ILIKE :starts_with
-				ORDER BY SCORE_STRNORM(tag)
-				"), array("tags_min"=>$tags_min, "starts_with"=>$starts_with));
+				"),
+			array("tags_min"=>$tags_min, "starts_with"=>$starts_with)
+		);
+
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+
+		$querylet->append_sql($database->scoreql_to_sql(" ORDER BY SCORE_STRNORM(tag)"));
+
+		$tag_data = $database->get_pairs($querylet->sql, $querylet->variables);
 
 		$html = "";
 		if($config->get_bool("tag_list_pages")) $html .= $this->build_az();
-		
+
 		/*
 		  strtolower() vs. mb_strtolower()
 		  ( See http://www.php.net/manual/en/function.mb-strtolower.php for more info )
-		 
+
 		  PHP5's strtolower function does not support Unicode (UTF-8) properly, so
 		  you have to use another function, mb_strtolower, to handle UTF-8 strings.
-		  
+
 		  What's worse is that mb_strtolower is horribly SLOW.
-		  
+
 		  It would probably be better to have a config option for the Tag List that
 		  would allow you to specify if there are UTF-8 tags.
-		  
-		*/ 
+
+		*/
 		mb_internal_encoding('UTF-8');
-		
+
 		$lastLetter = "";
 		# postres utf8 string sort ignores punctuation, so we get "aza, a-zb, azc"
 		# which breaks down into "az, a-, az" :(
@@ -322,21 +355,26 @@ class TagList extends Extension {
 		global $database;
 
 		$tags_min = $this->get_tags_min();
-		
+
 		// Make sure that the value of $tags_min is at least 1.
 		// Otherwise the database will complain if you try to do: LOG(0)
 		if ($tags_min < 1){ $tags_min = 1; }
-		
+
 		// check if we have a cached version
 		$cache_key = data_path("cache/tag_popul-" . md5("tp" . $tags_min) . ".html");
 		if(file_exists($cache_key)) {return file_get_contents($cache_key);}
 
-		$tag_data = $database->get_all("
-				SELECT tag, count, FLOOR(LOG(count)) AS scaled
-				FROM tags
-				WHERE count >= :tags_min
-				ORDER BY count DESC, tag ASC
-				", array("tags_min"=>$tags_min));
+		$querylet = new Querylet("
+			SELECT tag, count, FLOOR(LOG(count)) AS scaled
+			FROM tags
+			WHERE count >= :tags_min",
+			array("tags_min"=>$tags_min)
+		);
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+		$querylet->append_sql(" ORDER BY count DESC, tag ASC");
+		$tag_data = $database->get_all($querylet->sql, $querylet->variables);
 
 		$html = "Results grouped by log<sub>10</sub>(n)";
 		$lastLog = "";
@@ -393,29 +431,37 @@ class TagList extends Extension {
 	private function add_related_block(Page $page, Image $image) {
 		global $database, $config;
 
-		$query = "
-			SELECT t3.tag AS tag, t3.count AS calc_count, it3.tag_id
+		$querylet = new Querylet("
+			SELECT tags.tag AS tag, tags.count AS calc_count, it3.tag_id
 			FROM
-				image_tags AS it1,
-				image_tags AS it2,
-				image_tags AS it3,
-				tags AS t1,
-				tags AS t3
+			image_tags AS it1,
+			image_tags AS it2,
+			image_tags AS it3,
+			tags AS t1,
+			tags AS tags
 			WHERE
-				it1.image_id=:image_id
-				AND it1.tag_id=it2.tag_id
-				AND it2.image_id=it3.image_id
-				AND t1.tag != 'tagme'
-				AND t3.tag != 'tagme'
-				AND t1.id = it1.tag_id
-				AND t3.id = it3.tag_id
-			GROUP BY it3.tag_id, t3.tag, t3.count
+			it1.image_id=:image_id
+			AND it1.tag_id=it2.tag_id
+			AND it2.image_id=it3.image_id
+			AND t1.tag != 'tagme'
+			AND tags.tag != 'tagme'
+			AND t1.id = it1.tag_id
+			AND tags.id = it3.tag_id",
+			array("image_id"=>$image->id, "tag_list_length"=>$config->get_int('tag_list_length'))
+		);
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+		$querylet->append_sql(
+			" GROUP BY it3.tag_id, tags.tag, tags.count
 			ORDER BY calc_count DESC
-			LIMIT :tag_list_length
-		";
-		$args = array("image_id"=>$image->id, "tag_list_length"=>$config->get_int('tag_list_length'));
+			LIMIT :tag_list_length"
+		);
+		if(array_key_exists('tags_table', $querylet->variables)) {
+			$querylet->variables['tagid_column'] = 't1.id';
+		}
 
-		$tags = $database->get_all($query, $args);
+		$tags = $database->get_all($querylet->sql, $querylet->variables);
 		if(count($tags) > 0) {
 			$this->theme->display_related_block($page, $tags);
 		}
@@ -428,16 +474,19 @@ class TagList extends Extension {
 	private function add_split_tags_block(Page $page, Image $image) {
 		global $database;
 
-		$query = "
+		$querylet = new Querylet("
 			SELECT tags.tag, tags.count as calc_count
 			FROM tags, image_tags
 			WHERE tags.id = image_tags.tag_id
-			AND image_tags.image_id = :image_id
-			ORDER BY calc_count DESC
-		";
-		$args = array("image_id"=>$image->id);
+			AND image_tags.image_id = :image_id",
+			array("image_id"=>$image->id)
+		);
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+		$querylet->append_sql(" ORDER BY calc_count DESC");
 
-		$tags = $database->get_all($query, $args);
+		$tags = $database->get_all($querylet->sql, $querylet->variables);
 		if(count($tags) > 0) {
 			$this->theme->display_split_related_block($page, $tags);
 		}
@@ -450,16 +499,20 @@ class TagList extends Extension {
 	private function add_tags_block(Page $page, Image $image) {
 		global $database;
 
-		$query = "
+		$querylet = new Querylet("
 			SELECT tags.tag, tags.count as calc_count
 			FROM tags, image_tags
 			WHERE tags.id = image_tags.tag_id
-			AND image_tags.image_id = :image_id
-			ORDER BY calc_count DESC
-		";
-		$args = array("image_id"=>$image->id);
+			AND image_tags.image_id = :image_id",
+			array("image_id"=>$image->id)
+		);
 
-		$tags = $database->get_all($query, $args);
+		$tle = new TagListEvent($querylet);
+		send_event($tle);
+		$querylet = $tle->query;
+		$querylet->append_sql(" ORDER BY calc_count DESC");
+
+		$tags = $database->get_all($querylet->sql, $querylet->variables);
 		if(count($tags) > 0) {
 			$this->theme->display_related_block($page, $tags);
 		}
@@ -471,19 +524,21 @@ class TagList extends Extension {
 	private function add_popular_block(Page $page) {
 		global $database, $config;
 
-		$tags = $database->cache->get("popular_tags");
+		$tags = $database->cache->get("popular_tags_".$user->id);
 		if(empty($tags)) {
-			$query = "
+			$querylet = new Querylet("
 				SELECT tag, count as calc_count
 				FROM tags
-				WHERE count > 0
-				ORDER BY count DESC
-				LIMIT :popular_tag_list_length
-				";
-			$args = array("popular_tag_list_length"=>$config->get_int('popular_tag_list_length'));
+				WHERE count > 0",
+				array("popular_tag_list_length"=>$config->get_int('popular_tag_list_length'))
+			);
+			$tle = new TagListEvent($querylet);
+			send_event($tle);
+			$querylet = $tle->query;
 
-			$tags = $database->get_all($query, $args);
-			$database->cache->set("popular_tags", $tags, 600);
+			$querylet->append_sql(" ORDER BY count DESC LIMIT :popular_tag_list_length");
+			$tags = $database->get_all($querylet->sql, $querylet->variables);
+			$database->cache->set("popular_tags_".$user->id, $tags, 600);
 		}
 		if(count($tags) > 0) {
 			$this->theme->display_popular_block($page, $tags);
@@ -500,7 +555,7 @@ class TagList extends Extension {
 
 		$wild_tags = $search;
 		$str_search = Tag::implode($search);
-		$related_tags = $database->cache->get("related_tags:$str_search");
+		$related_tags = $database->cache->get("related_tags:$str_search:".$user->id);
 
 		if(empty($related_tags)) {
 			// $search_tags = array();
@@ -510,9 +565,13 @@ class TagList extends Extension {
 			foreach($wild_tags as $tag) {
 				$tag = str_replace("*", "%", $tag);
 				$tag = str_replace("?", "_", $tag);
-				$tag_ids = $database->get_col("SELECT id FROM tags WHERE tag LIKE :tag", array("tag"=>$tag));
+				$querylet = new Querylet("SELECT id FROM tags WHERE tag LIKE :tag", array("tag"=>$tag));
+				$tle = new TagListEvent($querylet);
+				send_event($tle);
+				$querylet = $tle->query;
+				$tag_ids = $database->get_col($querylet->sql, $querylet->variables);
 				// $search_tags = array_merge($search_tags,
-				//                  $database->get_col("SELECT tag FROM tags WHERE tag LIKE :tag", array("tag"=>$tag)));
+				//		  $database->get_col("SELECT tag FROM tags WHERE tag LIKE :tag", array("tag"=>$tag)));
 				$tag_id_array = array_merge($tag_id_array, $tag_ids);
 				$tags_ok = count($tag_ids) > 0;
 				if(!$tags_ok) break;
@@ -520,26 +579,29 @@ class TagList extends Extension {
 			$tag_id_list = join(', ', $tag_id_array);
 
 			if($tags_ok) {
-				$query = "
-					SELECT t2.tag AS tag, COUNT(it2.image_id) AS calc_count
-					FROM
-						image_tags AS it1,
-						image_tags AS it2,
-						tags AS t1,
-						tags AS t2
-					WHERE
-						t1.id IN($tag_id_list)
-						AND it1.image_id=it2.image_id
-						AND it1.tag_id = t1.id
-						AND it2.tag_id = t2.id
-					GROUP BY t2.tag
-					ORDER BY calc_count
-					DESC LIMIT :limit
-				";
-				$args = array("limit"=>$config->get_int('tag_list_length'));
+				$querylet = new Querylet("
+				SELECT tags.tag AS tag, COUNT(it2.image_id) AS calc_count
+				FROM
+					image_tags AS it1,
+					image_tags AS it2,
+					tags AS t1,
+					tags AS tags
+				WHERE
+					t1.id IN($tag_id_list)
+					AND it1.image_id=it2.image_id
+					AND it1.tag_id = t1.id
+					AND it2.tag_id = tags.id",
+				array("limit"=>$config->get_int('tag_list_length'))
+				);
+				$tle = new TagListEvent($querylet);
+				send_event($tle);
+				$querylet = $tle->query;
+				$querylet->append_sql(" GROUP BY tags.tag
+				ORDER BY calc_count
+				DESC LIMIT :limit");
 
-				$related_tags = $database->get_all($query, $args);
-				$database->cache->set("related_tags:$str_search", $related_tags, 60*60);
+				$related_tags = $database->get_all($querylet->sql, $querylet->variables);
+				$database->cache->set("related_tags:$str_search:".$user->id, $related_tags, 60*60);
 			}
 		}
 
