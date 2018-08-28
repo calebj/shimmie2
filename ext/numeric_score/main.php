@@ -119,24 +119,28 @@ class NumericScore extends Extension {
 			}
 
 			$totaldate = $year."/".$month."/".$day;
-
-			$sql = "SELECT id FROM images
-			        WHERE EXTRACT(YEAR FROM posted) = :year
-					";
-			$args = array("limit" => $config->get_int("index_images"), "year" => $year);
+			$querylet = new Querylet("
+				SELECT id FROM images
+				WHERE EXTRACT(YEAR FROM posted) = :year ",
+				array(
+					"limit" => $config->get_int("index_images"),
+					"year" => $year
+				)
+			);
 
 			if($event->page_matches("popular_by_day")){
-				$sql .=
-					"AND EXTRACT(MONTH FROM posted) = :month
-					AND EXTRACT(DAY FROM posted) = :day";
-
-				$args = array_merge($args, array("month" => $month, "day" => $day));
+				$querylet->append(new Querylet("
+					AND EXTRACT(MONTH FROM posted) = :month
+					AND EXTRACT(DAY FROM posted) = :day ",
+					array("month" => $month, "day" => $day))
+				);
 				$dte = array($totaldate, date("F jS, Y", (strtotime($totaldate))), "\\y\\e\\a\\r\\=Y\\&\\m\\o\\n\\t\\h\\=m\\&\\d\\a\\y\\=d", "day");
 			}
 			else if($event->page_matches("popular_by_month")){
-				$sql .=	"AND EXTRACT(MONTH FROM posted) = :month";
-
-				$args = array_merge($args, array("month" => $month));
+				$querylet->append(new Querylet(
+					" AND EXTRACT(MONTH FROM posted) = :month ",
+					array("month" => $month))
+				);
 				$dte = array($totaldate, date("F Y", (strtotime($totaldate))), "\\y\\e\\a\\r\\=Y\\&\\m\\o\\n\\t\\h\\=m", "month");
 			}
 			else if($event->page_matches("popular_by_year")){
@@ -146,11 +150,26 @@ class NumericScore extends Extension {
 				// this should never happen due to the fact that the page event is already matched against earlier.
 				throw new UnexpectedValueException("Error: Invalid page event.");
 			}
-			$sql .= " AND NOT numeric_score=0 ORDER BY numeric_score DESC LIMIT :limit OFFSET 0";
+
+			if(ext_is_live("Filters")) {
+				$filter = Filters::get_image_filter_querylet($user);
+				$querylet->append_sql("AND ");
+				$querylet->append($filter);
+			}
+
+			if(ext_is_live("Ratings")) {
+				$set = Ratings::privs_to_sql(Ratings::get_user_privs($user));
+				$querylet->append(new Querylet(" AND rating IN ($set) "));
+			}
+
+			$querylet->append_sql("
+				AND NOT numeric_score=0
+				ORDER BY numeric_score DESC
+				LIMIT :limit OFFSET 0");
 
 			//filter images by score != 0 + date > limit to max images on one page > order from highest to lowest score
 
-			$result = $database->get_col($sql, $args);
+			$result = $database->get_col($querylet->sql, $querylet->variables);
 			$images = array();
 			foreach($result as $id) { $images[] = Image::by_id($id); }
 

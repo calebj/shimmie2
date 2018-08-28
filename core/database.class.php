@@ -38,6 +38,13 @@ class Querylet {
 	public function add_variable($var) {
 		$this->variables[] = $var;
 	}
+
+	/**
+	 * @param mixed $var
+	 */
+	public function merge_vars($variables) {
+		$this->variables = array_merge($this->variables, $variables);
+	}
 }
 
 class TagQuerylet {
