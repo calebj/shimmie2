@@ -22,7 +22,7 @@ class Querylet {
 	public function append($querylet) {
 		assert('!is_null($querylet)');
 		$this->sql .= $querylet->sql;
-		$this->variables = array_merge($this->variables, $querylet->variables);
+		$this->merge_vars($querylet->variables);
 	}
 
 	/**

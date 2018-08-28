@@ -137,7 +137,6 @@ class Ratings extends Extension {
 
 	public function onPageRequest(PageRequestEvent $event) {
 		global $user, $page;
-		
 		if ($event->page_matches("admin/bulk_rate")) {
 			if(!$user->is_admin()) {
 				throw new PermissionDeniedException();
