@@ -16,6 +16,7 @@ class AutoComplete extends Extension {
 
 			//$limit = 0;
 			$cache_key = "autocomplete-" . strtolower($_GET["s"]);
+			$cache_key .= "-" . $user->id;
 			$limitSQL = "";
 			$SQLarr = array("search"=>$_GET["s"]."%");
 			if(isset($_GET["limit"]) && $_GET["limit"] !== 0){
@@ -26,14 +27,17 @@ class AutoComplete extends Extension {
 
 			$res = $database->cache->get($cache_key);
 			if(!$res) {
-				$res = $database->get_pairs($database->scoreql_to_sql("
+				$querylet = new Querylet($database->scoreql_to_sql("
 					SELECT tag, count
 					FROM tags
 					WHERE SCORE_STRNORM(tag) LIKE SCORE_STRNORM(:search)
-					AND count > 0
-					ORDER BY count DESC
-					$limitSQL"), $SQLarr
+					AND count > 0"), $SQLarr
 				);
+				$tle = new TagListEvent($querylet);
+				send_event($tle);
+				$querylet = $tle->query;
+				$querylet->append_sql(" ORDER BY count DESC $limitSQL");
+				$res = $database->get_pairs($querylet->sql, $querylet->variables);
 				$database->cache->set($cache_key, $res, 600);
 			}
 
